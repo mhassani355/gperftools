@@ -1,0 +1,91 @@
+PACKAGE_NAME = gperftools
+VERSION = 2.1
+
+ifndef TARGET_ID
+LDIR = lib64
+else
+LDIR = lib
+endif
+
+GIT_COMMIT ?= $(shell git rev-parse HEAD)
+
+.PHONY: all
+all: build
+
+SST_BUILDDIR ?= /usr/share/idirect/build
+include $(SST_BUILDDIR)/sst_common.mk
+
+EXTRA_CPPFLAGS ?= $(filter-out -f% -O% -std=%,$(CPPFLAGS))
+ifneq ($(strip $(INCS)),)
+EXTRA_CPPFLAGS += $(strip $(INCS))
+endif
+
+EXTRA_CFLAGS ?= $(filter-out -std=% $(CPPFLAGS),$(CFLAGS))
+ifeq ($(findstring -O,$(EXTRA_CFLAGS)),)
+ifneq ($(strip $(OPTIMIZE_LEVEL)),)
+EXTRA_CFLAGS += $(OPTIMIZE_LEVEL)
+endif
+endif
+EXTRA_CFLAGS += -Wno-unused-but-set-variable -Wno-unused-parameter
+
+EXTRA_LDFLAGS ?= $(LDFLAGS)
+ifneq ($(strip $(INCS)),)
+EXTRA_LDFLAGS += $(strip $(subst include,$(LDIR),$(patsubst -I%,-L%,$(INCS))))
+endif
+
+configure: configure.ac
+	./autogen.sh
+# HACK: There is a switch case in configure.ac that tries to determine the CPU architecture to
+# build Valgrind for based on the "ARCH" part of the compiler's triplet. (e.g. "x86_64", "arm", or
+# "powerpc" - using the output of something like `$(CROSS_COMPILE)gcc -dumpmachine | cut -d- -f1`)
+# Unfortunately it does not support "arm", which the Altera toolchain for predator uses, only
+# "armv7". While we could fix this in configure.ac, that would potentially cause merge conflicts
+# with upstream. The right thing to do is to submit a patch upstream to Valgrind to fix their ARM
+# architecture detection in configure.ac. For now, we're just going to work around it in the
+# configure script that autoconf generated.
+	sed -ri 's/^(\s+armv7\*)\)$$/\1\|arm\)/' configure
+
+Makefile: configure
+	export COMPILER_BASE=$(COMPILER_PATH); \
+		export PATH=$(COMPILER_PATH)/bin:$${PATH}; \
+		export CC="$(if $(findstring gcc,$(notdir $(CC))),$(CC),$(CROSS_COMPILE)gcc)"; \
+		export CXX="$(CROSS_COMPILE)g++"; \
+		export AR="$(CROSS_COMPILE)ar"; \
+		export NM="$(CROSS_COMPILE)nm"; \
+		export RANLIB="$(CROSS_COMPILE)ranlib"; \
+		export STRIP="$(CROSS_COMPILE)strip"; \
+		export CPPFLAGS="$(strip $(EXTRA_CPPFLAGS))"; \
+		export CFLAGS="$(strip $(EXTRA_CFLAGS))"; \
+		export LDFLAGS="$(strip $(EXTRA_LDFLAGS))"; \
+	./configure \
+		--build=$(shell gcc -dumpmachine) --host=$(shell $(CC) -dumpmachine) \
+		--prefix=/usr
+
+.PHONY:
+build: Makefile
+	$(MAKE)
+
+.PHONY: install
+install:
+	$(info Installing output to $(DESTDIR))
+	$(MAKE) install
+ifneq ($(GIT_COMMIT),)
+	mkdir -p $(DESTDIR)/var/sadm/install/packages
+	echo "git checkout $(GIT_COMMIT)" > $(DESTDIR)/var/sadm/install/packages/$(PACKAGE_NAME)-$(VERSION)
+endif
+
+# Override the default "clean" target from sst_common.mk.
+.PHONY: clean
+clean:
+	test ! -e Makefile || $(MAKE) -i distclean
+	rm -rf localbase tmp_workspace
+ifdef BUILD_PLATFORM
+	rm -rf $(BUILD_PLATFORM)_root
+endif
+
+.PHONY: fast
+fast:
+	$(MAKE) -f Makefile.idirect
+ifdef DESTDIR
+	$(MAKE) -f Makefile.idirect install
+endif
